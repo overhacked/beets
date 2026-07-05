@@ -33,6 +33,10 @@ New features
   album art from online sources even when imported files are not modified by the
   auto-tagger. Default is ``no`` which means ``fetchart`` looks for art only in
   the local filesystem when the user (or ``quiet_fallback``) chooses ``asis``.
+- :doc:`plugins/fetchart`: Add ``embedded`` source that extracts embedded art
+  for an album into the file named by :ref:`art-filename`. Add ``skip_embedded``
+  setting that allows ``fetchart`` to skip fetching art for files that already
+  have embedded art.
 
 Bug fixes
 ~~~~~~~~~
