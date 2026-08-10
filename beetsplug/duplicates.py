@@ -2,6 +2,10 @@
 
 import os
 import shlex
+import unicodedata
+from typing import NamedTuple
+
+from unidecode import unidecode
 
 from beets.library import Album, Item
 from beets.plugins import BeetsPlugin
@@ -15,6 +19,32 @@ from beets.util import (
 )
 
 PLUGIN = "duplicates"
+
+
+class KeyComparisonOptions(NamedTuple):
+    strict: bool
+    normalize: bool
+    ignore_case: bool
+    ignore_space: bool
+
+
+class RemoveUnicodeSpacePunctuation:
+    REMOVE_CATEGORIES = (
+        "P",  # punctuation
+        "Z",  # space and joiners
+        "C",  # control characters & other
+    )
+
+    def __getitem__(self, i: int) -> str | int | None:
+        category = unicodedata.category(chr(i))
+        if category.startswith(self.REMOVE_CATEGORIES):
+            return None
+
+        # Unmodified
+        raise LookupError
+
+
+REMOVE_UNICODE_SPACE_PUNCT = RemoveUnicodeSpacePunctuation()
 
 
 class DuplicatesPlugin(BeetsPlugin):
@@ -33,6 +63,9 @@ class DuplicatesPlugin(BeetsPlugin):
                 "format": "",
                 "full": False,
                 "keys": [],
+                "normalize": False,
+                "ignore_case": False,
+                "ignore_space": False,
                 "merge": False,
                 "move": "",
                 "path": False,
@@ -89,6 +122,25 @@ class DuplicatesPlugin(BeetsPlugin):
             help="report duplicates based on keys (use multiple times)",
         )
         self._command.parser.add_option(
+            "--normalize",
+            dest="normalize",
+            action="store_true",
+            help="normalize key values (Unicode form KC) before comparison",
+        )
+        self._command.parser.add_option(
+            "-i",
+            "--ignore-case",
+            dest="ignore_case",
+            action="store_true",
+            help="ignore case of key values",
+        )
+        self._command.parser.add_option(
+            "--ignore-space",
+            dest="ignore_space",
+            action="store_true",
+            help="ignore space and punctuation when comparing key values",
+        )
+        self._command.parser.add_option(
             "-M",
             "--merge",
             dest="merge",
@@ -143,8 +195,13 @@ class DuplicatesPlugin(BeetsPlugin):
             move = bytestring_path(self.config["move"].as_str())
             path = self.config["path"].get(bool)
             tiebreak = self.config["tiebreak"].get(dict)
-            strict = self.config["strict"].get(bool)
             tag = self.config["tag"].get(str)
+            compare_opts = KeyComparisonOptions(
+                strict=self.config["strict"].get(bool),
+                normalize=self.config["normalize"].get(bool),
+                ignore_case=self.config["ignore_case"].get(bool),
+                ignore_space=self.config["ignore_space"].get(bool),
+            )
 
             if album:
                 if not keys:
@@ -177,9 +234,9 @@ class DuplicatesPlugin(BeetsPlugin):
                 items,
                 keys=keys,
                 full=full,
-                strict=strict,
                 tiebreak=tiebreak,
                 merge=merge,
+                compare_opts=compare_opts,
             ):
                 if obj_id:  # Skip empty IDs.
                     for o in objs:
@@ -263,7 +320,21 @@ class DuplicatesPlugin(BeetsPlugin):
             )
         return key, checksum
 
-    def _group_by(self, objs, keys, strict):
+    def _normalize_value(self, value, compare_opts):
+        if not isinstance(value, str):
+            return value
+
+        if compare_opts.ignore_case:
+            value = value.casefold()
+        if compare_opts.normalize:
+            value = unicodedata.normalize("NFKC", value)
+        if compare_opts.ignore_space:
+            value = value.translate(REMOVE_UNICODE_SPACE_PUNCT)
+        if compare_opts.normalize:
+            value = unidecode(value)
+        return value
+
+    def _group_by(self, objs, keys, compare_opts):
         """Return a dictionary with keys arbitrary concatenations of attributes
         and values lists of objects (Albums or Items) with those keys.
 
@@ -274,14 +345,18 @@ class DuplicatesPlugin(BeetsPlugin):
         counts = collections.defaultdict(list)
         for obj in objs:
             values = [getattr(obj, k, None) for k in keys]
-            values = [v for v in values if v not in (None, "")]
-            if strict and len(values) < len(keys):
+            values = [
+                self._normalize_value(v, compare_opts)
+                for v in values
+                if v not in (None, "")
+            ]
+            if compare_opts.strict and len(values) < len(keys):
                 self._log.debug(
                     "some keys {} on item {.filepath} are null or empty: skipping",
                     keys,
                     obj,
                 )
-            elif not strict and not len(values):
+            elif not compare_opts.strict and not len(values):
                 self._log.debug(
                     "all keys {} on item {.filepath} are null or empty: skipping",
                     keys,
@@ -388,10 +463,10 @@ class DuplicatesPlugin(BeetsPlugin):
             objs = self._merge_albums(objs)
         return objs
 
-    def _duplicates(self, objs, keys, full, strict, tiebreak, merge):
+    def _duplicates(self, objs, keys, full, tiebreak, merge, compare_opts):
         """Generate triples of keys, duplicate counts, and constituent objects."""
         offset = 0 if full else 1
-        for k, objs in self._group_by(objs, keys, strict).items():
+        for k, objs in self._group_by(objs, keys, compare_opts).items():
             if len(objs) > 1:
                 objs = self._order(objs, tiebreak)
                 if merge:
